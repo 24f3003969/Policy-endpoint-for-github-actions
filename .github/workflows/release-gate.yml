@@ -1,0 +1,69 @@
+name: TDS GA7 Release Gate
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "TDS identity: 24f3003969@ds.study.iitm.ac.in"
+        run: echo "24f3003969@ds.study.iitm.ac.in"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests against policy engine
+        run: python -m pytest tests/ -v
+
+      - name: Start service and smoke-test /release-gate over HTTP
+        run: |
+          python app.py &
+          SERVER_PID=$!
+          sleep 2
+
+          SAFE=$(curl -s -X POST http://127.0.0.1:8000/release-gate \
+            -H "Content-Type: application/json" \
+            -d '{
+              "target":"preview","event":"pull_request","ref":"refs/heads/feature/x",
+              "workflow":{"trigger":"pull_request",
+                "permissions":{"contents":"read","packages":"write","id-token":"none"},
+                "testsPassed":true,"matrixComplete":true,"failFast":false,
+                "actions":[{"owner":"actions","name":"checkout","ref":"v4"}]},
+              "image":{"multiStage":true,"runsAsRoot":false,"secretMode":"none",
+                "criticalVulnerabilities":0,"digestPinned":true}
+            }')
+          echo "Safe payload response: $SAFE"
+          echo "$SAFE" | grep -q '"decision":"promote"'
+          echo "$SAFE" | grep -q '"violations":\[\]'
+
+          UNSAFE=$(curl -s -X POST http://127.0.0.1:8000/release-gate \
+            -H "Content-Type: application/json" \
+            -d '{
+              "target":"production","event":"pull_request","ref":"refs/heads/dev",
+              "workflow":{"trigger":"pull_request_target",
+                "permissions":{"contents":"read","packages":"write","id-token":"write"},
+                "testsPassed":false,"matrixComplete":true,"failFast":true,
+                "actions":[{"owner":"acme","name":"foo","ref":"nothex"}],
+                "environmentApproval":false},
+              "image":{"multiStage":false,"runsAsRoot":true,"secretMode":"arg",
+                "criticalVulnerabilities":2,"digestPinned":false}
+            }')
+          echo "Unsafe payload response: $UNSAFE"
+          echo "$UNSAFE" | grep -q '"decision":"block"'
+          echo "$UNSAFE" | grep -q 'EXCESS_PERMISSION'
+          echo "$UNSAFE" | grep -q 'APPROVAL_REQUIRED'
+
+          kill $SERVER_PID
